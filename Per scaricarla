@@ -1,0 +1,18 @@
+1. Su Browser Desktop (es. Chrome, Edge):
+Icona di Installazione: Quando un utente visita la tua PWA (che soddisfa i criteri di installabilità, come avere un manifest e un service worker, cosa di cui vite-plugin-pwa si occupa), il browser di solito mostra un'icona nella barra degli indirizzi (spesso un'icona tipo un computer con una freccia verso il basso, o un "+" dentro un cerchio).
+Prompt del Browser: Cliccando su quell'icona, il browser chiederà all'utente se vuole installare l'applicazione.
+Accesso: Una volta installata, l'app apparirà tra le altre applicazioni installate sul computer (es. nel menu Start di Windows, nel Launchpad di macOS, o come icona sul desktop) e si aprirà in una finestra dedicata, senza la UI del browser.
+2. Su Android (es. con Chrome):
+Prompt Automatico: Dopo che l'utente ha interagito con il sito un paio di volte, Chrome potrebbe mostrare automaticamente un banner in basso che chiede "Aggiungi [Nome App] alla schermata Home".
+Menu del Browser: Se il prompt automatico non appare (o l'utente lo ignora), può solitamente installare la PWA manualmente:
+Toccando il menu con i tre puntini (⋮) in Chrome.
+Selezionando l'opzione "Installa app" o "Aggiungi a schermata Home".
+Icona sulla Home: L'app verrà aggiunta come icona alla schermata Home del dispositivo, proprio come le altre app. Quando aperta, si comporterà come un'app nativa (se configurata come standalone nel manifest).
+3. Su iOS (con Safari):
+Il processo è un po' più manuale e non c'è un prompt proattivo.
+L'utente deve:
+Visitare la tua PWA in Safari.
+Toccare l'icona "Condividi" (il quadrato con la freccia verso l'alto).
+Scorrere tra le opzioni e selezionare "Aggiungi alla schermata Home".
+Confermare il nome dell'app (se modificabile) e toccare "Aggiungi".
+Icona sulla Home: Anche qui, l'app apparirà sulla schermata Home e, se ben configurata, si aprirà a schermo intero.

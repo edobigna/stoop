@@ -1,0 +1,9 @@
+
+{
+  "name": "Stoop",
+  "short_name": "Stoop",
+  "description": "Trova e condividi oggetti gratuiti nella tua comunità.",
+  "theme_color": "#3A912D",
+  "background_color": "#F0FFF0",
+  "requestFramePermissions": ["geolocation"]
+}

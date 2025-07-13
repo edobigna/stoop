@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">stoop</string>
+    <string name="title_activity_main">stoop</string>
+    <string name="package_name">com.stoop.app</string>
+    <string name="custom_url_scheme">com.stoop.app</string>
+</resources>
