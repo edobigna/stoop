@@ -182,11 +182,8 @@ const HomePage: React.FC = () => {
     <div className="container mx-auto px-2 sm:px-4 py-6">
       <header className="mb-6 text-center">
         <h1 className="text-4xl sm:text-5xl font-extrabold text-stoop-green-darker tracking-tight">
-          Scopri Oggetti Unici!
+          Cosa ti serve oggi?
         </h1>
-        <p className="mt-3 text-lg text-gray-600 max-w-2xl mx-auto">
-          Trova tesori gratuiti nella tua comunità o condividi ciò che non usi più.
-        </p>
       </header>
       
       <div className="mb-4 p-3 bg-white rounded-xl shadow-md border border-gray-200/70 sticky top-16 z-30 space-y-3">
@@ -253,7 +250,7 @@ const HomePage: React.FC = () => {
               <p className="text-gray-500 mt-2">Prova a modificare i filtri o il criterio di ricerca.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5">
             {sortedAndFilteredAds.map(ad => (
               <AdCard 
                 key={ad.id} 

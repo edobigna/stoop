@@ -166,7 +166,7 @@ const AdCard: React.FC<AdCardProps> = ({
         );
     }
     
-    // Ad is reserved, show status or join waiting list button
+    // Ad is reserved, show status for current user if they are involved
     if (amITheCurrentReserver) {
         if (ad.reservationStatus === ReservationStatus.PENDING) {
             return <p className="mt-2 text-xs text-center text-yellow-700 bg-yellow-100 p-1.5 rounded-md border border-yellow-200">Richiesta inviata</p>;
@@ -176,17 +176,8 @@ const AdCard: React.FC<AdCardProps> = ({
         }
     } else if (amIOnWaitingList) {
         return <p className="mt-2 text-xs text-center text-blue-700 bg-blue-100 p-1.5 rounded-md border border-blue-200">Sei in lista d'attesa</p>;
-    } else if (ad.reservationStatus !== ReservationStatus.COMPLETED) {
-        return (
-            <button
-                onClick={handleJoinWaitingListFromCard}
-                disabled={actionInProgress}
-                className="w-full mt-2 py-2 px-3 bg-gray-200 text-gray-700 text-xs font-semibold rounded-md hover:bg-gray-300 transition-colors flex items-center justify-center shadow disabled:opacity-60"
-              >
-                {actionInProgress ? <LoadingSpinner size="sm" /> : <><HiOutlineQueueList className="w-4 h-4 mr-1.5" /> Unisciti Lista d'Attesa</>}
-              </button>
-        );
-    }
+    } 
+    // removed join waiting list button here
     
     return null;
   };
@@ -238,17 +229,6 @@ const AdCard: React.FC<AdCardProps> = ({
           <p className="text-sm text-gray-700 mb-2 line-clamp-2">
             {ad.description}
           </p>
-
-          {ad.tags && ad.tags.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {ad.tags.slice(0, 3).map((tag, index) => ( 
-                <span key={index} className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full flex items-center border border-gray-200">
-                  <HiOutlineTag className="w-2.5 h-2.5 mr-1 opacity-70" />
-                  {tag}
-                </span>
-              ))}
-            </div>
-          )}
           
           <div className="flex items-center justify-between text-xs text-gray-500 mt-auto pt-2 border-t border-gray-100">
             <span>Pubblicato il: {postedDate}</span>
