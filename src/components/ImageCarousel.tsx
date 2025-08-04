@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { DEFAULT_AD_IMAGE_PLACEHOLDER, DEFAULT_AD_IMAGE_PLACEHOLDER_ALT } from '../constants';
 import { HiOutlineChevronLeft, HiOutlineChevronRight } from 'react-icons/hi2';
