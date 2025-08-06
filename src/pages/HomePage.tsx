@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { Ad, LocationCoords } from '../types';
 import { firebaseApi } from '../services/firebaseApi';
@@ -250,7 +251,7 @@ const HomePage: React.FC = () => {
               <p className="text-gray-500 mt-2">Prova a modificare i filtri o il criterio di ricerca.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
             {sortedAndFilteredAds.map(ad => (
               <AdCard 
                 key={ad.id} 
