@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState, FormEvent, ChangeEvent, useCallback } from 'react';
 import * as ReactRouterDOM from 'react-router-dom';
 import { User, Ad } from '../types';
@@ -200,11 +201,6 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ viewOwnProfile }) => {
     navigate(`/edit-ad/${adId}`);
   };
 
-  const handleAdUpdatedOnProfilePage = (updatedAd: Ad) => {
-    setUserAds(prevAds => prevAds.map(ad => ad.id === updatedAd.id ? updatedAd : ad));
-  };
-
-
   useEffect(() => {
     const currentPreview = editProfilePhotoPreview;
     return () => {
@@ -362,7 +358,6 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ viewOwnProfile }) => {
                     showDeleteButton={isOwnProfile}
                     onDeleteAd={isOwnProfile ? handleDeleteAd : undefined}
                     onEditAd={isOwnProfile ? handleEditAd : undefined}
-                    onAdUpdated={handleAdUpdatedOnProfilePage}
                 />
               ))}
             </div>

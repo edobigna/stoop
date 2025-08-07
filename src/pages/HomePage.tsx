@@ -94,10 +94,6 @@ const HomePage: React.FC = () => {
       handleRequestLocation();
     }
   }, [appliedFilters.sortCriteria, userLocation, isFetchingLocation, handleRequestLocation]);
-
-  const handleAdUpdated = (updatedAd: Ad) => {
-    setAds(prevAds => prevAds.map(ad => ad.id === updatedAd.id ? updatedAd : ad));
-  };
   
   const handleApplyFilters = (newFilters: AppliedFilters) => {
     setAppliedFilters(newFilters);
@@ -136,7 +132,7 @@ const HomePage: React.FC = () => {
     }
 
     if (appliedFilters.sortCriteria === 'date_desc') {
-      processedAds.sort((a, b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
+      // The main sorting by date and reservation status is handled in firebaseApi.getAds()
     } else if (appliedFilters.sortCriteria === 'distance_asc' && userLocation) {
       processedAds = processedAds
         .map(ad => ({
@@ -147,14 +143,6 @@ const HomePage: React.FC = () => {
         }))
         .sort((a, b) => a.distance - b.distance);
     }
-    
-    processedAds.sort((a, b) => {
-        const aIsReserved = a.isReserved;
-        const bIsReserved = b.isReserved;
-        if (aIsReserved && !bIsReserved) return 1;
-        if (!aIsReserved && bIsReserved) return -1;
-        return 0;
-    });
 
     return processedAds;
   }, [ads, searchTerm, appliedFilters, userLocation]);
@@ -251,13 +239,12 @@ const HomePage: React.FC = () => {
               <p className="text-gray-500 mt-2">Prova a modificare i filtri o il criterio di ricerca.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {sortedAndFilteredAds.map(ad => (
               <AdCard 
                 key={ad.id} 
                 ad={ad} 
-                currentUser={currentUser} 
-                onAdUpdated={handleAdUpdated}
+                currentUser={currentUser}
               />
             ))}
           </div>

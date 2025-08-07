@@ -1,3 +1,4 @@
+
 import firebase from 'firebase/compat/app';
 import { auth, db, storage } from './firebase';
 import {
@@ -37,19 +38,12 @@ const isValidId = (id: any, fieldName: string, throwOnError: boolean = true): id
 export const firebaseApi: IFirebaseApiServiceType = {
   // AUTHENTICATION
   login: async (email: string, pass: string): Promise<User | null> => {
-    try {
-        const userCredential = await auth.signInWithEmailAndPassword(email, pass);
-        if (userCredential.user) {
-        isValidId(userCredential.user.uid, "login.userCredential.user.uid");
-        return firebaseApi.getUserById(userCredential.user.uid);
-        }
-        return null;
-    } catch(error: any) {
-        if(error.code === 'auth/invalid-credential') {
-            throw new Error("Email o password non corretti. Riprova.");
-        }
-        throw new Error("Si è verificato un errore durante il login.");
+    const userCredential = await auth.signInWithEmailAndPassword(email, pass);
+    if (userCredential.user) {
+      isValidId(userCredential.user.uid, "login.userCredential.user.uid");
+      return firebaseApi.getUserById(userCredential.user.uid);
     }
+    return null;
   },
 
   register: async (
@@ -93,16 +87,47 @@ export const firebaseApi: IFirebaseApiServiceType = {
   // USER MANAGEMENT
   getUserById: async (userId: string): Promise<User | null> => {
     if (!isValidId(userId, "getUserById.userId", false)) {
-      console.warn(`User ID '${userId}' is invalid.`);
+      console.warn(`User ID '${userId}' is invalid. Attempting fallback to auth.currentUser.`);
+      if (auth.currentUser && auth.currentUser.uid === userId) {
+        const fbUser = auth.currentUser;
+        const nameParts = fbUser.displayName?.split(" ") || [];
+        return {
+            id: fbUser.uid,
+            firstName: nameParts[0] || 'Utente',
+            lastName: nameParts.slice(1).join(' ') || '',
+            nickname: undefined,
+            email: fbUser.email || '',
+            profilePhotoUrl: fbUser.photoURL || DEFAULT_PROFILE_PHOTO,
+        };
+      }
       return null;
     }
     const userDocRef = db.collection('users').doc(userId);
     const userDocSnap = await userDocRef.get();
     if (userDocSnap.exists) {
       const data = userDocSnap.data() as Omit<User, 'id'>;
-      return { id: userDocSnap.id, ...data };
+      return {
+        id: userDocSnap.id,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        nickname: data.nickname,
+        email: data.email,
+        profilePhotoUrl: data.profilePhotoUrl,
+      };
     }
-    
+    if (auth.currentUser && auth.currentUser.uid === userId) {
+        console.warn(`User ID: ${userId} not found in Firestore, but matches current auth user. Returning auth user data.`);
+        const fbUser = auth.currentUser;
+        const nameParts = fbUser.displayName?.split(" ") || [];
+        return {
+            id: fbUser.uid,
+            firstName: nameParts[0] || 'Utente',
+            lastName: nameParts.slice(1).join(' ') || '',
+            nickname: undefined,
+            email: fbUser.email || '',
+            profilePhotoUrl: fbUser.photoURL || DEFAULT_PROFILE_PHOTO,
+        };
+    }
     console.warn(`User not found in Firestore for ID: ${userId}`);
     return null;
   },
@@ -164,13 +189,28 @@ export const firebaseApi: IFirebaseApiServiceType = {
     }
   },
 
-  // ADS
-  _mapAdDataToAd: async (adDoc: firebase.firestore.QueryDocumentSnapshot | firebase.firestore.DocumentSnapshot): Promise<Ad | null> => {
-    const adData = adDoc.data() as FirestoreAdData;
-    if(adData.reservationStatus === ReservationStatus.COMPLETED) {
-        return null;
-    }
+  getCompletedReservationsCountForUser: async (userId: string): Promise<number> => {
+    isValidId(userId, "getCompletedReservationsCountForUser.userId");
 
+    // This counts items a user has successfully received.
+    const reservationsSnapshot = await db.collection('reservations')
+      .where('requesterId', '==', userId)
+      .where('status', '==', ReservationStatus.COMPLETED)
+      .get();
+
+    // This counts street finds a user has picked up.
+    const streetFindsSnapshot = await db.collection('ads')
+      .where('reservedByUserId', '==', userId)
+      .where('isStreetFind', '==', true)
+      .where('reservationStatus', '==', ReservationStatus.COMPLETED)
+      .get();
+      
+    return reservationsSnapshot.size + streetFindsSnapshot.size;
+  },
+
+  // ADS
+  _mapAdDataToAd: async (adDoc: firebase.firestore.QueryDocumentSnapshot | firebase.firestore.DocumentSnapshot): Promise<Ad> => {
+    const adData = adDoc.data() as FirestoreAdData;
     isValidId(adData.userId, "_mapAdDataToAd.adData.userId", false);
     const user = await firebaseApi.getUserById(adData.userId);
     return {
@@ -187,7 +227,6 @@ export const firebaseApi: IFirebaseApiServiceType = {
       isReserved: adData.isReserved || false,
       reservedByUserId: adData.reservedByUserId,
       reservationStatus: adData.reservationStatus,
-      waitingListUserIds: adData.waitingListUserIds || [],
       tags: adData.tags || [],
       isStreetFind: adData.isStreetFind || false,
     };
@@ -195,15 +234,23 @@ export const firebaseApi: IFirebaseApiServiceType = {
 
   getAds: async (): Promise<Ad[]> => {
     const adsCollectionRef = db.collection('ads');
-    const querySnapshot = await adsCollectionRef
-      .where('reservationStatus', '!=', ReservationStatus.COMPLETED)
-      .orderBy('reservationStatus') 
-      .orderBy('postedAt', 'desc')
-      .get();
-    
+    const querySnapshot = await adsCollectionRef.orderBy('postedAt', 'desc').get();
+
     const adsListPromises = querySnapshot.docs.map(doc => firebaseApi._mapAdDataToAd(doc));
-    const adsList = (await Promise.all(adsListPromises)).filter((ad): ad is Ad => ad !== null);
+    let allAds = await Promise.all(adsListPromises);
     
+    // Filter out completed ads client-side. This ensures ads without a `reservationStatus` field are included.
+    let adsList = allAds.filter(ad => ad.reservationStatus !== ReservationStatus.COMPLETED);
+
+    // Client-side sort to ensure reserved (but not completed) are at the bottom
+    adsList.sort((a, b) => {
+        const aIsReserved = a.isReserved || false;
+        const bIsReserved = b.isReserved || false;
+        if (aIsReserved === bIsReserved) {
+            return new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime();
+        }
+        return aIsReserved ? 1 : -1;
+    });
     return adsList;
   },
 
@@ -221,49 +268,8 @@ export const firebaseApi: IFirebaseApiServiceType = {
     isValidId(userId, "getUserAds.userId");
     const adsCollectionRef = db.collection('ads');
     const querySnapshot = await adsCollectionRef.where('userId', '==', userId).orderBy('postedAt', 'desc').get();
-    const adsListPromises = querySnapshot.docs.map(async doc => {
-        const adData = doc.data() as FirestoreAdData;
-        const user = await firebaseApi.getUserById(adData.userId);
-        return {
-          id: doc.id,
-          userId: adData.userId,
-          user: user || undefined,
-          title: adData.title,
-          description: adData.description,
-          category: adData.category,
-          images: adData.images || [],
-          locationName: adData.locationName,
-          gpsCoords: adData.gpsCoords ? { latitude: adData.gpsCoords.latitude, longitude: adData.gpsCoords.longitude } : undefined,
-          postedAt: formatTimestamp(adData.postedAt),
-          isReserved: adData.isReserved || false,
-          reservedByUserId: adData.reservedByUserId,
-          reservationStatus: adData.reservationStatus,
-          waitingListUserIds: adData.waitingListUserIds || [],
-          tags: adData.tags || [],
-          isStreetFind: adData.isStreetFind || false,
-        };
-    });
+    const adsListPromises = querySnapshot.docs.map(doc => firebaseApi._mapAdDataToAd(doc));
     return Promise.all(adsListPromises);
-  },
-
-   getCompletedReservationsCountForUser: async (userId: string): Promise<number> => {
-    isValidId(userId, "getCompletedReservationsCountForUser.userId");
-
-    const givenAwaySnapshot = await db.collection('ads')
-      .where('userId', '==', userId)
-      .where('reservationStatus', '==', ReservationStatus.COMPLETED)
-      .get();
-
-    const pickedUpSnapshot = await db.collection('ads')
-      .where('reservedByUserId', '==', userId)
-      .where('reservationStatus', '==', ReservationStatus.COMPLETED)
-      .get();
-      
-    const completedAdIds = new Set<string>();
-    givenAwaySnapshot.forEach(doc => completedAdIds.add(doc.id));
-    pickedUpSnapshot.forEach(doc => completedAdIds.add(doc.id));
-
-    return completedAdIds.size;
   },
 
   createAd: async (adData: FrontendAdCreationData): Promise<Ad | null> => {
@@ -279,7 +285,6 @@ export const firebaseApi: IFirebaseApiServiceType = {
       locationName: adData.locationName,
       postedAt: firebase.firestore.FieldValue.serverTimestamp(),
       isReserved: false,
-      waitingListUserIds: [],
       tags: adData.tags && adData.tags.length > 0 ? adData.tags : [],
       isStreetFind: adData.isStreetFind || false,
     };
@@ -361,10 +366,6 @@ export const firebaseApi: IFirebaseApiServiceType = {
     const adData = adSnap.data() as FirestoreAdData;
     if (adData.userId !== userId) throw new Error("Non autorizzato a eliminare questo annuncio.");
 
-    if (!adData.isStreetFind && adData.isReserved && adData.reservationStatus === ReservationStatus.ACCEPTED) {
-        throw new Error("Impossibile eliminare un annuncio con una prenotazione attiva accettata.");
-    }
-
     if (adData.images && adData.images.length > 0) {
         for (const imageUrl of adData.images) {
             await firebaseApi.deleteImageByUrl(imageUrl);
@@ -374,53 +375,49 @@ export const firebaseApi: IFirebaseApiServiceType = {
   },
 
   // RESERVATIONS
-  createReservation: async (adId: string, requesterId: string): Promise<Ad | null> => {
+  createReservation: async (adId: string, requesterId: string): Promise<void> => {
     isValidId(adId, "createReservation.adId");
     isValidId(requesterId, "createReservation.requesterId");
 
     const adRef = db.collection('ads').doc(adId);
-    const requesterRef = db.collection('users').doc(requesterId);
+    const adSnap = await adRef.get();
+    if (!adSnap.exists) throw new Error("Annuncio non trovato.");
+    const adData = adSnap.data() as FirestoreAdData;
 
-    await db.runTransaction(async (transaction) => {
-      // --- ALL READS FIRST ---
-      const adSnap = await transaction.get(adRef);
-      const requesterSnap = await transaction.get(requesterRef);
+    if (adData.isStreetFind) throw new Error("Gli oggetti trovati in strada non possono essere prenotati, solo ritirati.");
+    if (adData.userId === requesterId) throw new Error("Non puoi prenotare il tuo stesso annuncio.");
+    if (adData.isReserved) throw new Error("Questo annuncio è già stato prenotato.");
 
-      if (!adSnap.exists) throw new Error("Annuncio non trovato.");
-      if (!requesterSnap.exists) throw new Error("Utente richiedente non trovato.");
+    const existingReservationQuery = await db.collection('reservations')
+        .where('adId', '==', adId)
+        .where('requesterId', '==', requesterId)
+        .where('status', '==', ReservationStatus.PENDING)
+        .limit(1).get();
 
-      const adData = adSnap.data() as FirestoreAdData;
-      const requester = { id: requesterSnap.id, ...requesterSnap.data() } as User;
+    if (!existingReservationQuery.empty) {
+        throw new Error("Hai già inviato una richiesta per questo oggetto.");
+    }
 
-      // --- VALIDATION ---
-      if (adData.isStreetFind) throw new Error("Gli oggetti trovati in strada non possono essere prenotati, solo ritirati.");
-      if (adData.userId === requesterId) throw new Error("Non puoi prenotare il tuo stesso annuncio.");
-      if (adData.isReserved) {
-        throw new Error("Questo annuncio è già stato prenotato o ha una richiesta in sospeso. Prova ad unirti alla lista d'attesa.");
-      }
+    const requester = await firebaseApi.getUserById(requesterId);
+    if (!requester) throw new Error("Utente richiedente non trovato.");
 
-      // --- ALL WRITES LAST ---
-      const reservationRef = db.collection('reservations').doc();
-      const newReservationData: Omit<Reservation, 'id' | 'requestedAt'> & { requestedAt: firebase.firestore.FieldValue } = {
-        adId: adId,
-        adTitle: adData.title,
-        adMainImage: adData.images && adData.images.length > 0 ? adData.images[0] : '',
-        requesterId: requesterId,
-        requesterName: getUserDisplayName(requester),
-        ownerId: adData.userId,
-        status: ReservationStatus.PENDING,
-        requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      };
-      transaction.set(reservationRef, newReservationData);
-      
-      transaction.update(adRef, {
-        isReserved: true,
-        reservedByUserId: requesterId,
-        reservationStatus: ReservationStatus.PENDING
-      });
+    const reservationRef = db.collection('reservations').doc();
+    const newReservationData: Omit<Reservation, 'id' | 'requestedAt'> & { requestedAt: firebase.firestore.FieldValue } = {
+      adId: adId,
+      adTitle: adData.title,
+      adMainImage: adData.images && adData.images.length > 0 ? adData.images[0] : '',
+      requesterId: requesterId,
+      requesterName: getUserDisplayName(requester),
+      requesterProfilePhotoUrl: requester.profilePhotoUrl,
+      ownerId: adData.userId,
+      status: ReservationStatus.PENDING,
+      requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    };
 
-      const ownerNotificationRef = db.collection('notifications').doc();
-      const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue } = {
+    await reservationRef.set(newReservationData);
+
+    isValidId(adData.userId, "createReservation.adData.userId (for notification)");
+    const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue } = {
         userId: adData.userId,
         type: 'RESERVATION_REQUEST',
         title: `Nuova richiesta per "${adData.title}"`,
@@ -429,296 +426,167 @@ export const firebaseApi: IFirebaseApiServiceType = {
         isRead: false,
         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         reservationDetails: {
-          adId: adId,
-          adTitle: adData.title,
-          requesterName: getUserDisplayName(requester),
-          reservationId: reservationRef.id,
+            adId: adId,
+            adTitle: adData.title,
+            requesterName: getUserDisplayName(requester),
+            reservationId: reservationRef.id,
         }
-      };
-      transaction.set(ownerNotificationRef, ownerNotification);
-    });
-
-    return firebaseApi.getAdById(adId);
+    };
+    await db.collection('notifications').add(ownerNotification);
   },
   
-  joinWaitingList: async (adId: string, userId: string): Promise<Ad | null> => {
-    isValidId(adId, "joinWaitingList.adId");
-    isValidId(userId, "joinWaitingList.userId");
-
-    const adRef = db.collection('ads').doc(adId);
-    const userRef = db.collection('users').doc(userId);
-
-    await db.runTransaction(async (transaction) => {
-      // --- ALL READS FIRST ---
-      const adSnap = await transaction.get(adRef);
-      const userSnap = await transaction.get(userRef);
-
-      if (!adSnap.exists) throw new Error("Annuncio non trovato.");
-      if (!userSnap.exists) throw new Error("Utente non trovato.");
-
-      const adData = adSnap.data() as FirestoreAdData;
-      const user = { id: userSnap.id, ...userSnap.data() } as User;
-
-      // --- VALIDATION ---
-      if (adData.isStreetFind) throw new Error("Non è possibile unirsi alla lista d'attesa per oggetti trovati in strada.");
-      if (adData.userId === userId) throw new Error("Non puoi metterti in lista d'attesa per il tuo annuncio.");
-      if (adData.reservedByUserId === userId) throw new Error("Hai già una richiesta attiva per questo annuncio.");
-      if (adData.waitingListUserIds?.includes(userId)) throw new Error("Sei già in lista d'attesa.");
-      if (adData.reservationStatus === ReservationStatus.COMPLETED) throw new Error("Questo oggetto è già stato consegnato/ritirato.");
-      if (!adData.isReserved) throw new Error("Questo oggetto non è ancora prenotato, puoi effettuare una prenotazione diretta.");
-
-      // --- ALL WRITES LAST ---
-      transaction.update(adRef, {
-        waitingListUserIds: firebase.firestore.FieldValue.arrayUnion(userId)
-      });
-
-      const joinerNotificationRef = db.collection('notifications').doc();
-      const joinerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
-        userId: userId,
-        type: 'WAITING_LIST_JOINED',
-        title: `Ti sei unito alla lista d'attesa per "${adData.title}"`,
-        message: `Sei stato aggiunto alla lista d'attesa. Ti avviseremo se diventi il prossimo in linea.`,
-        relatedItemId: adId,
-        isRead: false,
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      };
-      transaction.set(joinerNotificationRef, joinerNotification);
-
-      const ownerNotificationRef = db.collection('notifications').doc();
-      const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
-        userId: adData.userId,
-        type: 'OWNER_WAITING_LIST_UPDATE',
-        title: `Nuovo utente in lista d'attesa per "${adData.title}"`,
-        message: `${getUserDisplayName(user)} si è unito alla lista d'attesa per il tuo oggetto: "${adData.title}".`,
-        relatedItemId: adId,
-        isRead: false,
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      };
-      transaction.set(ownerNotificationRef, ownerNotification);
+  getReservationsForAd: async (adId: string): Promise<Reservation[]> => {
+    isValidId(adId, "getReservationsForAd.adId");
+    const reservationsQuery = await db.collection('reservations')
+        .where('adId', '==', adId)
+        .orderBy('requestedAt', 'asc')
+        .get();
+    
+    return reservationsQuery.docs.map(doc => {
+        const data = doc.data() as Omit<Reservation, 'id'|'requestedAt'> & {requestedAt: firebase.firestore.Timestamp};
+        return {
+            ...data,
+            id: doc.id,
+            requestedAt: formatTimestamp(data.requestedAt)
+        };
     });
-
-    return firebaseApi.getAdById(adId);
   },
 
-  updateReservationStatus: async (reservationId: string, newStatus: ReservationStatus, currentUserId: string, originalNotificationId?: string): Promise<Reservation | null> => {
+  updateReservationStatus: async (reservationId: string, newStatus: ReservationStatus, currentUserId: string, originalNotificationId?: string): Promise<void> => {
     isValidId(reservationId, "updateReservationStatus.reservationId");
     isValidId(currentUserId, "updateReservationStatus.currentUserId");
 
     const reservationRef = db.collection('reservations').doc(reservationId);
+    
+    // --- Phase 1: Perform all necessary READS before creating the batch ---
+    const reservationSnap = await reservationRef.get();
+    if (!reservationSnap.exists) throw new Error("Prenotazione non trovata.");
+    const reservationData = reservationSnap.data() as Reservation;
 
-    // Perform the chat query OUTSIDE the transaction to avoid the typing issue with transaction.get(query)
-    let existingChatDocId: string | null = null;
+    if (reservationData.ownerId !== currentUserId) {
+        throw new Error("Non autorizzato a modificare questa prenotazione.");
+    }
+    const adRef = db.collection('ads').doc(reservationData.adId);
+
+    // --- Phase 2: Create batch and add all WRITE operations ---
+    const batch = db.batch();
+
+    // Mark original notification as read
+    if (originalNotificationId && isValidId(originalNotificationId, "updateReservationStatus.originalNotificationId", false)) {
+        const notifRef = db.collection('notifications').doc(originalNotificationId);
+        batch.update(notifRef, { isRead: true });
+    }
+
     if (newStatus === ReservationStatus.ACCEPTED) {
-        // We need the reservation data to build the query, so we do an initial read here.
-        // It will be re-read inside the transaction for consistency.
-        const initialReservationSnap = await reservationRef.get();
-        if (initialReservationSnap.exists) {
-            const initialReservationData = initialReservationSnap.data() as Reservation;
-            const sortedParticipantIds = [initialReservationData.ownerId, initialReservationData.requesterId].sort();
-            const chatQuery = db.collection('chatSessions')
-                .where('participantIds', '==', sortedParticipantIds)
-                .where('adId', '==', initialReservationData.adId)
-                .limit(1);
-            const chatQuerySnapshot = await chatQuery.get();
-            if (!chatQuerySnapshot.empty) {
-                existingChatDocId = chatQuerySnapshot.docs[0].id;
-            }
+        // Additional reads for ACCEPTED case
+        const otherReservationsQuery = db.collection('reservations')
+            .where('adId', '==', reservationData.adId)
+            .where('status', '==', ReservationStatus.PENDING);
+        const otherReservationsSnap = await otherReservationsQuery.get();
+        
+        const sortedParticipantIds = [reservationData.ownerId, reservationData.requesterId].sort();
+        const chatQuery = db.collection('chatSessions')
+            .where('participantIds', '==', sortedParticipantIds)
+            .where('adId', '==', reservationData.adId)
+            .limit(1);
+        const chatQuerySnapshot = await chatQuery.get();
+
+        // --- Add writes to batch for ACCEPTED case ---
+        batch.update(adRef, {
+            isReserved: true,
+            reservedByUserId: reservationData.requesterId,
+            reservationStatus: ReservationStatus.ACCEPTED
+        });
+
+        let chatSessionId: string;
+        if (!chatQuerySnapshot.empty) {
+            const existingChatDoc = chatQuerySnapshot.docs[0];
+            chatSessionId = existingChatDoc.id;
+            batch.update(existingChatDoc.ref, {
+                isClosed: false,
+                closedByUserId: firebase.firestore.FieldValue.delete(),
+                reservationWasAccepted: true
+            });
+        } else {
+            const newChatRef = db.collection('chatSessions').doc();
+            chatSessionId = newChatRef.id;
+            batch.set(newChatRef, {
+                participantIds: sortedParticipantIds, adId: reservationData.adId, adTitle: reservationData.adTitle,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(), isClosed: false, reservationWasAccepted: true,
+            });
         }
+
+        batch.update(reservationRef, { status: ReservationStatus.ACCEPTED, chatSessionId: chatSessionId });
+        
+        const acceptedNotifRef = db.collection('notifications').doc();
+        batch.set(acceptedNotifRef, {
+             userId: reservationData.requesterId, type: 'RESERVATION_ACCEPTED',
+             title: `Prenotazione per "${reservationData.adTitle}" accettata!`,
+             message: `La tua richiesta per "${reservationData.adTitle}" è stata accettata. Puoi ora chattare con il proprietario.`,
+             relatedItemId: chatSessionId, isRead: false, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+
+        otherReservationsSnap.docs.forEach(doc => {
+            if (doc.id !== reservationId) {
+                batch.update(doc.ref, { status: ReservationStatus.DECLINED });
+                const declinedNotifRef = db.collection('notifications').doc();
+                batch.set(declinedNotifRef, {
+                    userId: doc.data().requesterId, type: 'RESERVATION_DECLINED',
+                    title: `Oggetto "${reservationData.adTitle}" non più disponibile`,
+                    message: `L'oggetto "${reservationData.adTitle}" che avevi richiesto è stato assegnato ad un altro utente.`,
+                    relatedItemId: reservationData.adId, isRead: false, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                });
+            }
+        });
+
+    } else if (newStatus === ReservationStatus.DECLINED) {
+        batch.update(reservationRef, { status: ReservationStatus.DECLINED });
+        const declinedNotifRef = db.collection('notifications').doc();
+        batch.set(declinedNotifRef, {
+            userId: reservationData.requesterId, type: 'RESERVATION_DECLINED',
+            title: `Richiesta per "${reservationData.adTitle}" rifiutata`,
+            message: `La tua richiesta per "${reservationData.adTitle}" è stata rifiutata dal proprietario.`,
+            relatedItemId: reservationData.adId, isRead: false, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
     }
     
-    await db.runTransaction(async (transaction) => {
-        // --- TRANSACTION READS ---
-        const reservationSnap = await transaction.get(reservationRef);
-        if (!reservationSnap.exists) throw new Error("Prenotazione non trovata.");
-        const reservationData = reservationSnap.data() as Reservation;
+    // --- Phase 3: Commit all writes atomically ---
+    await batch.commit();
+},
 
-        const adRef = db.collection('ads').doc(reservationData.adId);
-        const adSnap = await transaction.get(adRef);
-        if (!adSnap.exists) throw new Error("Annuncio correlato non trovato.");
-        const adData = adSnap.data() as FirestoreAdData;
-        
-        let nextRequesterSnap: firebase.firestore.DocumentSnapshot | null = null;
-        const adWaitingList = adData.waitingListUserIds || [];
-        if (newStatus === ReservationStatus.DECLINED && adWaitingList.length > 0) {
-            const nextUserId = adWaitingList[0];
-            const nextRequesterRef = db.collection('users').doc(nextUserId);
-            nextRequesterSnap = await transaction.get(nextRequesterRef);
-        }
-
-        // Re-read chat document inside transaction if it was found
-        if (existingChatDocId) {
-            const chatDocRef = db.collection('chatSessions').doc(existingChatDocId);
-            await transaction.get(chatDocRef); // This ensures the transaction is aware of the chat doc's state
-        }
-        
-        // --- VALIDATION ---
-        if (reservationData.ownerId !== currentUserId) {
-          throw new Error("Non autorizzato a modificare questa prenotazione.");
-        }
-
-        // --- TRANSACTION WRITES ---
-        transaction.update(reservationRef, { status: newStatus });
-
-        if (originalNotificationId && isValidId(originalNotificationId, "updateReservationStatus.originalNotificationId", false)) {
-            const notifRef = db.collection('notifications').doc(originalNotificationId);
-            transaction.update(notifRef, { isRead: true });
-        }
-
-        let adUpdate: { [key: string]: any } = { reservationStatus: newStatus };
-        let notificationType: AppNotification['type'] | null = null;
-        let notificationTitle = '';
-        let notificationMessage = '';
-        let notificationRelatedItemId: string | undefined;
-
-        if (newStatus === ReservationStatus.ACCEPTED) {
-          adUpdate.isReserved = true;
-          adUpdate.reservedByUserId = reservationData.requesterId;
-          
-          let chatSessionId: string;
-            if (existingChatDocId) {
-                const existingChatDocRef = db.collection('chatSessions').doc(existingChatDocId);
-                chatSessionId = existingChatDocRef.id;
-                transaction.update(existingChatDocRef, {
-                    isClosed: false,
-                    closedByUserId: firebase.firestore.FieldValue.delete(),
-                    reservationWasAccepted: true,
-                    reservationId: reservationId,
-                });
-            } else {
-                const newChatRef = db.collection('chatSessions').doc();
-                chatSessionId = newChatRef.id;
-                const sortedParticipantIds = [reservationData.ownerId, reservationData.requesterId].sort();
-                transaction.set(newChatRef, {
-                    participantIds: sortedParticipantIds,
-                    adId: reservationData.adId,
-                    adTitle: reservationData.adTitle,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-                    isClosed: false,
-                    reservationWasAccepted: true,
-                    reservationId: reservationId,
-                });
-            }
-
-          notificationRelatedItemId = chatSessionId;
-          transaction.update(reservationRef, { chatSessionId: chatSessionId });
-          
-          notificationType = 'RESERVATION_ACCEPTED';
-          notificationTitle = `Prenotazione per "${reservationData.adTitle}" accettata!`;
-          notificationMessage = `La tua richiesta per "${reservationData.adTitle}" è stata accettata. Puoi ora chattare con il proprietario.`;
-
-        } else if (newStatus === ReservationStatus.DECLINED) {
-            if (nextRequesterSnap && nextRequesterSnap.exists) {
-                const nextUserId = adWaitingList[0];
-                const remainingWaitingList = adWaitingList.slice(1);
-                const nextRequester = { id: nextRequesterSnap.id, ...nextRequesterSnap.data() } as User;
-                
-                const newReservationRef = db.collection('reservations').doc();
-                const newReservationData: Omit<Reservation, 'id' | 'requestedAt'> & { requestedAt: firebase.firestore.FieldValue } = {
-                    adId: reservationData.adId, adTitle: adData.title, adMainImage: adData.images?.[0] || '',
-                    requesterId: nextUserId, requesterName: getUserDisplayName(nextRequester),
-                    ownerId: adData.userId, status: ReservationStatus.PENDING,
-                    requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
-                };
-                transaction.set(newReservationRef, newReservationData);
-
-                adUpdate = {
-                    isReserved: true,
-                    reservedByUserId: nextUserId,
-                    reservationStatus: ReservationStatus.PENDING,
-                    waitingListUserIds: remainingWaitingList,
-                };
-
-                const ownerNotifRef = db.collection('notifications').doc();
-                transaction.set(ownerNotifRef, {
-                    userId: adData.userId, type: 'PROMOTED_FROM_WAITING_LIST',
-                    title: `Nuova richiesta da lista d'attesa`,
-                    message: `${getUserDisplayName(nextRequester)} è ora il primo in coda per "${adData.title}".`,
-                    relatedItemId: newReservationRef.id, isRead: false, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-                    reservationDetails: { adId: reservationData.adId, adTitle: adData.title, requesterName: getUserDisplayName(nextRequester), reservationId: newReservationRef.id }
-                });
-
-            } else {
-                adUpdate = {
-                    isReserved: false,
-                    reservedByUserId: firebase.firestore.FieldValue.delete(),
-                    reservationStatus: firebase.firestore.FieldValue.delete(),
-                    waitingListUserIds: firebase.firestore.FieldValue.delete(),
-                };
-            }
-
-            notificationType = 'RESERVATION_DECLINED';
-            notificationTitle = `Prenotazione per "${reservationData.adTitle}" rifiutata`;
-            notificationMessage = `La tua richiesta per "${reservationData.adTitle}" è stata rifiutata.`;
-            notificationRelatedItemId = reservationData.adId;
-        }
-
-        transaction.update(adRef, adUpdate);
-
-        if (notificationType && notificationRelatedItemId) {
-          isValidId(reservationData.requesterId, "updateReservationStatus.requesterId (for notification)");
-          const requesterNotificationRef = db.collection('notifications').doc();
-          const requesterNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
-            userId: reservationData.requesterId,
-            type: notificationType,
-            title: notificationTitle,
-            message: notificationMessage,
-            relatedItemId: notificationRelatedItemId,
-            isRead: false,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            reservationDetails: { adId: reservationData.adId, adTitle: reservationData.adTitle, requesterName: reservationData.requesterName, reservationId: reservationId }
-          };
-          transaction.set(requesterNotificationRef, requesterNotification);
-        }
-    });
-
-    const updatedReservationSnap = await reservationRef.get();
-    if(!updatedReservationSnap.exists) return null;
-    const updatedData = updatedReservationSnap.data() as Omit<Reservation, 'id'>;
-    return { ...updatedData, id: updatedReservationSnap.id, requestedAt: formatTimestamp(updatedData.requestedAt as any) };
-  },
 
   claimStreetFind: async (adId: string, pickerUserId: string, adOwnerId: string, adTitle: string): Promise<Ad | null> => {
     isValidId(adId, "claimStreetFind.adId");
     isValidId(pickerUserId, "claimStreetFind.pickerUserId");
     isValidId(adOwnerId, "claimStreetFind.adOwnerId");
-    
+
     const adRef = db.collection('ads').doc(adId);
-    const pickerUserRef = db.collection('users').doc(pickerUserId);
+    const adSnap = await adRef.get();
+    if (!adSnap.exists) throw new Error("Annuncio non trovato.");
+    const adData = adSnap.data() as FirestoreAdData;
 
-    await db.runTransaction(async (transaction) => {
-        // --- ALL READS FIRST ---
-        const adSnap = await transaction.get(adRef);
-        const pickerUserSnap = await transaction.get(pickerUserRef);
+    if (!adData.isStreetFind) throw new Error("Questo annuncio non è una segnalazione da strada.");
+    if (adData.reservationStatus === ReservationStatus.COMPLETED) throw new Error("Questo oggetto è già stato ritirato.");
 
-        if (!adSnap.exists) throw new Error("Annuncio non trovato.");
-        if (!pickerUserSnap.exists) throw new Error("Utente che ha ritirato l'oggetto non trovato.");
-
-        const adData = adSnap.data() as FirestoreAdData;
-        const pickerUser = { id: pickerUserSnap.id, ...pickerUserSnap.data() } as User;
-
-        // --- VALIDATION ---
-        if (!adData.isStreetFind) throw new Error("Questo annuncio non è una segnalazione da strada.");
-        if (adData.reservationStatus === ReservationStatus.COMPLETED) throw new Error("Questo oggetto è già stato ritirato.");
-
-        // --- ALL WRITES LAST ---
-        transaction.update(adRef, {
-            isReserved: true,
-            reservedByUserId: pickerUserId,
-            reservationStatus: ReservationStatus.COMPLETED,
-        });
-
-        const ownerNotificationRef = db.collection('notifications').doc();
-        const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
-            userId: adOwnerId,
-            type: 'STREET_FIND_PICKED_UP',
-            title: `Oggetto "${adTitle}" ritirato!`,
-            message: `${getUserDisplayName(pickerUser)} ha segnato il tuo oggetto "${adTitle}" come ritirato dalla strada.`,
-            relatedItemId: adId,
-            isRead: false,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-        };
-        transaction.set(ownerNotificationRef, ownerNotification);
+    await adRef.update({
+        isReserved: true,
+        reservedByUserId: pickerUserId,
+        reservationStatus: ReservationStatus.COMPLETED,
     });
+
+    const pickerUser = await firebaseApi.getUserById(pickerUserId);
+    if (!pickerUser) throw new Error("Utente che ha ritirato l'oggetto non trovato.");
+
+    const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
+        userId: adOwnerId,
+        type: 'STREET_FIND_PICKED_UP',
+        title: `Oggetto "${adTitle}" ritirato!`,
+        message: `${getUserDisplayName(pickerUser)} ha segnato il tuo oggetto "${adTitle}" come ritirato dalla strada.`,
+        relatedItemId: adId,
+        isRead: false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    };
+    await db.collection('notifications').add(ownerNotification);
 
     return firebaseApi.getAdById(adId);
   },
@@ -752,11 +620,10 @@ export const firebaseApi: IFirebaseApiServiceType = {
       isClosed: data.isClosed || false,
       closedByUserId: data.closedByUserId,
       reservationWasAccepted: data.reservationWasAccepted || false,
-      reservationId: data.reservationId,
     };
   },
 
-  createChatSession: async (participantIds: string[], adId: string, adTitle: string, reservationId?: string, reservationWasAccepted = false): Promise<ChatSession | null> => {
+  createChatSession: async (participantIds: string[], adId: string, adTitle: string, reservationWasAccepted = false): Promise<ChatSession | null> => {
     if (participantIds.length !== 2) throw new Error("Le sessioni di chat devono avere due partecipanti.");
     isValidId(participantIds[0], "createChatSession.participantIds[0]");
     isValidId(participantIds[1], "createChatSession.participantIds[1]");
@@ -773,23 +640,16 @@ export const firebaseApi: IFirebaseApiServiceType = {
     if (!querySnapshot.empty) {
       const existingSessionDoc = querySnapshot.docs[0];
       const existingSessionData = existingSessionDoc.data();
-      const updates: { [key:string]: any } = {};
-
       if (reservationWasAccepted && !existingSessionData.reservationWasAccepted) {
-        updates.reservationWasAccepted = true;
-      }
-      if (existingSessionData.isClosed) {
-         updates.isClosed = false;
-         updates.closedByUserId = firebase.firestore.FieldValue.delete();
-      }
-      if(Object.keys(updates).length > 0) {
-        await existingSessionDoc.ref.update(updates);
+        await existingSessionDoc.ref.update({ reservationWasAccepted: true, isClosed: false, closedByUserId: firebase.firestore.FieldValue.delete() });
+      } else if (existingSessionData.isClosed && reservationWasAccepted) {
+         await existingSessionDoc.ref.update({ isClosed: false, closedByUserId: firebase.firestore.FieldValue.delete() });
       }
       return firebaseApi._mapChatSessionData(existingSessionDoc);
     }
 
     const chatSessionRef = db.collection('chatSessions').doc();
-    const newSessionData: { [key:string]: any } = {
+    const newSessionData = {
       participantIds: sortedParticipantIds,
       adId: adId,
       adTitle: adTitle,
@@ -797,9 +657,6 @@ export const firebaseApi: IFirebaseApiServiceType = {
       isClosed: false,
       reservationWasAccepted: reservationWasAccepted,
     };
-    if (reservationId) {
-        newSessionData.reservationId = reservationId;
-    }
     await chatSessionRef.set(newSessionData);
     const newSessionSnap = await chatSessionRef.get();
     return firebaseApi._mapChatSessionData(newSessionSnap);
@@ -813,7 +670,7 @@ export const firebaseApi: IFirebaseApiServiceType = {
       .onSnapshot(async snapshot => {
         try {
             const sessionsPromises = snapshot.docs.map(doc => firebaseApi._mapChatSessionData(doc));
-            let sessions = await Promise.all(sessionsPromises);
+            const sessions = await Promise.all(sessionsPromises);
             sessions.sort((a, b) => {
                 const timeA = a.lastMessageTimestamp ? new Date(a.lastMessageTimestamp).getTime() : new Date(a.createdAt).getTime();
                 const timeB = b.lastMessageTimestamp ? new Date(b.lastMessageTimestamp).getTime() : new Date(b.createdAt).getTime();
@@ -850,17 +707,16 @@ export const firebaseApi: IFirebaseApiServiceType = {
     isValidId(currentUserId, "getChatMessagesStreamed.currentUserId");
     const chatSessionRef = db.collection('chatSessions').doc(chatId);
 
-    // Initial check for access
     chatSessionRef.get().then(sessionDoc => {
         if (!sessionDoc.exists || !(sessionDoc.data()?.participantIds as string[]).includes(currentUserId)) {
             if(onError) onError(new Error("Accesso negato o chat non trovata."));
             callback([]);
-            return () => {};
+            return () => {}; // Should return unsubscribe function, even if empty.
         }
     }).catch(err => {
         if(onError) onError(err);
         callback([]);
-        return () => {};
+        return () => {}; // Should return unsubscribe function.
     });
 
     return chatSessionRef.collection('messages')
@@ -870,13 +726,12 @@ export const firebaseApi: IFirebaseApiServiceType = {
         try {
             const messagesPromises = snapshot.docs.map(async doc => {
             const data = doc.data();
-            const sender = data.isSystemMessage ? null : await firebaseApi.getUserById(data.senderId);
+            isValidId(data.senderId, "getChatMessagesStreamed.data.senderId", false);
             return {
                 id: doc.id,
                 chatId: chatId,
                 senderId: data.senderId,
-                senderName: sender ? getUserDisplayName(sender) : 'Sistema',
-                senderProfilePhotoUrl: sender?.profilePhotoUrl || DEFAULT_PROFILE_PHOTO,
+                senderName: '...', // Name is not stored on message doc
                 text: data.text,
                 timestamp: formatTimestamp(data.timestamp),
                 isSystemMessage: data.isSystemMessage || false
@@ -932,91 +787,92 @@ export const firebaseApi: IFirebaseApiServiceType = {
     isValidId(chatId, "closeChatSession.chatId");
     isValidId(userIdClosing, "closeChatSession.userIdClosing");
     const chatSessionRef = db.collection('chatSessions').doc(chatId);
-    
-    await db.runTransaction(async (transaction) => {
-        const sessionDoc = await transaction.get(chatSessionRef);
-        if (!sessionDoc.exists) throw new Error("Chat non trovata.");
+    const sessionDoc = await chatSessionRef.get();
+    if (!sessionDoc.exists) throw new Error("Chat non trovata.");
 
-        const mappedSessionData = await firebaseApi._mapChatSessionData(sessionDoc);
-        if (!mappedSessionData.participantIds.includes(userIdClosing)) {
-            throw new Error("Non autorizzato a chiudere questa chat.");
-        }
+    const mappedSessionData = await firebaseApi._mapChatSessionData(sessionDoc);
+    if (!mappedSessionData.participantIds.includes(userIdClosing)) {
+        throw new Error("Non autorizzato a chiudere questa chat.");
+    }
 
-        const systemMessage = "Chat chiusa dall'utente. Non è più possibile inviare messaggi.";
-        const messageData = {
-            senderId: 'system',
-            text: systemMessage,
-            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-            isSystemMessage: true,
-        };
-        const newMessageRef = chatSessionRef.collection('messages').doc();
-        transaction.set(newMessageRef, messageData);
-        
-        transaction.update(chatSessionRef, {
-            isClosed: true,
-            closedByUserId: userIdClosing,
-            lastMessageText: systemMessage,
-            lastMessageTimestamp: firebase.firestore.FieldValue.serverTimestamp(),
-        });
+    await chatSessionRef.update({
+      isClosed: true,
+      closedByUserId: userIdClosing,
+      lastMessageText: "Chat chiusa.",
+      lastMessageTimestamp: firebase.firestore.FieldValue.serverTimestamp(),
     });
   },
-  
+
   completeExchangeAndCloseChat: async (chatId: string, userIdCompleting: string): Promise<void> => {
     isValidId(chatId, "completeExchangeAndCloseChat.chatId");
     isValidId(userIdCompleting, "completeExchangeAndCloseChat.userIdCompleting");
+
     const chatSessionRef = db.collection('chatSessions').doc(chatId);
+    
+    return db.runTransaction(async (transaction) => {
+      const sessionDoc = await transaction.get(chatSessionRef);
+      if (!sessionDoc.exists) throw new Error("Chat non trovata.");
+      const sessionData = sessionDoc.data() as ChatSession;
 
-    await db.runTransaction(async (transaction) => {
-        const sessionDoc = await transaction.get(chatSessionRef);
-        if (!sessionDoc.exists) throw new Error("Chat non trovata.");
-        
-        const chatData = sessionDoc.data() as ChatSession;
-        if (!chatData.participantIds.includes(userIdCompleting)) {
-            throw new Error("Non autorizzato a completare questo scambio.");
-        }
+      if (!sessionData.participantIds.includes(userIdCompleting)) {
+        throw new Error("Non autorizzato a completare questo scambio.");
+      }
 
-        const adRef = db.collection('ads').doc(chatData.adId);
-        const adSnap = await transaction.get(adRef);
-        if (!adSnap.exists) throw new Error("Annuncio associato non trovato.");
+      const adRef = db.collection('ads').doc(sessionData.adId);
+      const adDoc = await transaction.get(adRef);
+      if (!adDoc.exists) throw new Error("Annuncio associato non trovato.");
 
-        // Update ad to COMPLETED
-        transaction.update(adRef, { reservationStatus: ReservationStatus.COMPLETED });
+      // Find the reservation associated with this ad and accepted user.
+      const reservationDocs = await db.collection('reservations')
+                                .where('adId', '==', sessionData.adId)
+                                .where('status', '==', ReservationStatus.ACCEPTED)
+                                .limit(1).get();
+      
+      if (reservationDocs.empty) {
+        console.warn(`Nessuna prenotazione ACCETTATA trovata per l'annuncio ${sessionData.adId} durante il completamento.`);
+      }
 
-        // Add system message
-        const systemMessage = "Scambio completato! Questa chat è stata chiusa.";
-        const messageData = {
-            senderId: 'system',
-            text: systemMessage,
-            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-            isSystemMessage: true,
+      // Update Ad
+      transaction.update(adRef, { reservationStatus: ReservationStatus.COMPLETED });
+
+      // Update Reservation
+      if (!reservationDocs.empty) {
+        const reservationDoc = reservationDocs.docs[0];
+        transaction.update(reservationDoc.ref, { status: ReservationStatus.COMPLETED });
+      }
+
+      // Update Chat
+      const lastMessageText = "Scambio completato!";
+      transaction.update(chatSessionRef, {
+        isClosed: true,
+        closedByUserId: userIdCompleting,
+        lastMessageText: lastMessageText,
+        lastMessageTimestamp: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Add a system message to the chat
+      const systemMessageRef = chatSessionRef.collection('messages').doc();
+      transaction.set(systemMessageRef, {
+        text: lastMessageText,
+        senderId: 'system',
+        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+        isSystemMessage: true,
+      });
+
+      // Send notifications to both participants
+      sessionData.participantIds.forEach(participantId => {
+        const notificationRef = db.collection('notifications').doc();
+        const notification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
+            userId: participantId,
+            type: 'EXCHANGE_COMPLETED',
+            title: `Scambio per "${sessionData.adTitle}" completato!`,
+            message: `Lo scambio per l'oggetto "${sessionData.adTitle}" è stato segnato come completato.`,
+            relatedItemId: sessionData.adId,
+            isRead: false,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         };
-        const newMessageRef = chatSessionRef.collection('messages').doc();
-        transaction.set(newMessageRef, messageData);
-
-        // Update and close chat
-        transaction.update(chatSessionRef, {
-            isClosed: true,
-            closedByUserId: userIdCompleting,
-            lastMessageText: systemMessage,
-            lastMessageTimestamp: firebase.firestore.FieldValue.serverTimestamp(),
-        });
-
-        // Send notifications
-        const otherParticipantId = chatData.participantIds.find(id => id !== userIdCompleting);
-        const completer = await firebaseApi.getUserById(userIdCompleting);
-        if (otherParticipantId && completer) {
-            const notifRef = db.collection('notifications').doc();
-            const notification: Omit<AppNotification, 'id' | 'createdAt'> & {createdAt: firebase.firestore.FieldValue} = {
-                userId: otherParticipantId,
-                type: 'EXCHANGE_COMPLETED',
-                title: `Scambio per "${chatData.adTitle}" completato`,
-                message: `${getUserDisplayName(completer)} ha segnato lo scambio come completato.`,
-                relatedItemId: chatData.adId,
-                isRead: false,
-                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            };
-            transaction.set(notifRef, notification);
-        }
+        transaction.set(notificationRef, notification);
+      });
     });
   },
 
@@ -1066,23 +922,50 @@ export const firebaseApi: IFirebaseApiServiceType = {
         console.warn(`Notification ${notificationId} not found for marking as read.`);
     }
   },
-  
-  // REPORTS
+
   createReport: async (adId: string, reporterId: string, adOwnerId: string, adTitle: string, reason: ReportReason, details: string): Promise<void> => {
     isValidId(adId, "createReport.adId");
     isValidId(reporterId, "createReport.reporterId");
-
+    isValidId(adOwnerId, "createReport.adOwnerId");
+    
     const reportRef = db.collection('reports').doc();
-    await reportRef.set({
+    const reportData = {
       adId,
-      adTitle,
       reporterId,
       adOwnerId,
+      adTitle,
       reason,
       details,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      status: 'new' // 'new', 'in_review', 'resolved'
-    });
+      status: 'PENDING', // PENDING, REVIEWED, RESOLVED
+    };
+    await reportRef.set(reportData);
+
+    // Send notifications
+    const reporterNotification: Omit<AppNotification, 'id' | 'createdAt'> & { createdAt: firebase.firestore.FieldValue } = {
+        userId: reporterId,
+        type: 'AD_REPORTED_CONFIRMATION',
+        title: `Segnalazione per "${adTitle}" inviata`,
+        message: 'Grazie per averci aiutato a mantenere la community sicura. Esamineremo la tua segnalazione.',
+        relatedItemId: adId,
+        isRead: false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    };
+    await db.collection('notifications').add(reporterNotification);
+    
+    // Notify owner unless it's a safety concern to avoid retaliation
+    if (reason !== ReportReason.SAFETY_CONCERN) {
+        const ownerNotification: Omit<AppNotification, 'id' | 'createdAt'> & { createdAt: firebase.firestore.FieldValue } = {
+            userId: adOwnerId,
+            type: 'OWNER_AD_REPORTED',
+            title: `Il tuo annuncio "${adTitle}" è stato segnalato`,
+            message: 'Un utente ha segnalato il tuo annuncio. Il nostro team lo esaminerà presto.',
+            relatedItemId: adId,
+            isRead: false,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        };
+        await db.collection('notifications').add(ownerNotification);
+    }
   },
 
   // LOCATION HELPERS
@@ -1095,7 +978,9 @@ export const firebaseApi: IFirebaseApiServiceType = {
       navigator.geolocation.getCurrentPosition(
         async (position) => {
           const { latitude, longitude } = position.coords;
-          resolve({ latitude, longitude });
+          // Mock address, replace with actual reverse geocoding if needed
+          const address = `Lat: ${latitude.toFixed(4)}, Lon: ${longitude.toFixed(4)}`;
+          resolve({ latitude, longitude, address });
         },
         (error) => {
           let message = "Errore sconosciuto GPS.";
@@ -1111,64 +996,26 @@ export const firebaseApi: IFirebaseApiServiceType = {
     });
   },
 
-  getAddressSuggestions: async (query: string): Promise<{ description: string; latitude: number; longitude: number; }[]> => {
-    if (query.length < 3) return [];
-    
-    const endpoint = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&countrycodes=it&limit=5`;
-
-    try {
-      const response = await fetch(endpoint, {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Stoop/1.0 (stoop-app.web.app)',
-        }
-      });
-      if (!response.ok) {
-        throw new Error(`Nominatim API error: ${response.statusText}`);
-      }
-      const data = await response.json();
-      if (!Array.isArray(data)) {
-        return [];
-      }
-      return data.map(item => ({
-        description: item.display_name,
-        latitude: parseFloat(item.lat),
-        longitude: parseFloat(item.lon),
-      }));
-    } catch (error) {
-      console.error("Error fetching address suggestions from Nominatim:", error);
-      return [];
-    }
-  },
-
   geocodeAddress: async (address: string): Promise<LocationCoords | null> => {
-    if (!address.trim()) return null;
-
-    const endpoint = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=jsonv2&countrycodes=it&limit=1`;
-    
-    try {
-      const response = await fetch(endpoint, {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Stoop/1.0 (stoop.web.app)',
-        }
-      });
-       if (!response.ok) {
-        throw new Error(`Nominatim API error: ${response.statusText}`);
-      }
-      const data = await response.json();
-      if (Array.isArray(data) && data.length > 0) {
-        const result = data[0];
-        return {
-          latitude: parseFloat(result.lat),
-          longitude: parseFloat(result.lon),
-          address: result.display_name,
-        };
-      }
-      return null;
-    } catch (error) {
-      console.error(`Error geocoding address "${address}" with Nominatim:`, error);
-      return null;
+    console.warn("geocodeAddress is a MOCK function. For real geocoding, integrate a proper service like Google Geocoding API or Nominatim (OpenStreetMap).");
+    if (address.toLowerCase().includes("milano")) {
+      return { latitude: 45.4642, longitude: 9.1900, address: `Simulato: ${address}` };
+    } else if (address.toLowerCase().includes("roma")) {
+      return { latitude: 41.9028, longitude: 12.4964, address: `Simulato: ${address}` };
     }
+    return null;
+  },
+  
+  getAddressSuggestions: async (query: string): Promise<{ description: string; latitude: number; longitude: number; }[]> => {
+    console.warn("getAddressSuggestions is a MOCK function.");
+    if (!query || query.trim().length < 3) return [];
+
+    const mockResults = [
+        { description: `Via ${query} 1, Milano, Italia`, latitude: 45.4642, longitude: 9.1900 },
+        { description: `Piazza ${query}, Roma, Italia`, latitude: 41.9028, longitude: 12.4964 },
+        { description: `Corso ${query}, Napoli, Italia`, latitude: 40.8518, longitude: 14.2681 },
+    ];
+    // Simple filter to make it look like it's working
+    return mockResults.filter(r => r.description.toLowerCase().includes(query.toLowerCase()));
   },
 };

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, FormEvent } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ChatSession, ChatMessage, User } from '../types';
@@ -63,7 +64,7 @@ const ChatView: React.FC<ChatViewProps> = ({ chatId, currentUser, onChatClosedOr
         setSessionDetails(details);
 
         if (!messagesUnsubscribeRef.current && details) {
-            messagesUnsubscribeRef.current = firebaseApi.getChatMessagesStreamed(details.id, currentUser.id, (newMessages) => {
+            messagesUnsubscribeRef.current = firebaseApi.getChatMessagesStreamed(details.id, currentUser.id, (newMessages: ChatMessage[]) => {
               setMessages(newMessages);
             }, (msgErr) => {
                 console.error("Error streaming messages:", msgErr);

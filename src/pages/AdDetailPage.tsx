@@ -1,8 +1,8 @@
+
 import React, { useEffect, useState, useCallback } from 'react';
 import * as ReactRouterDOM from 'react-router-dom';
 import { Ad, ReservationStatus } from '../types';
 import { firebaseApi } from '../services/firebaseApi';
-import { db } from '../services/firebase'; // Added db import
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { DEFAULT_PROFILE_PHOTO, DEFAULT_PROFILE_PHOTO_ALT, DEFAULT_AD_IMAGE_PLACEHOLDER_ALT } from '../constants';
@@ -98,11 +98,9 @@ const AdDetailPage: React.FC = () => {
     if (!currentUser || !ad || !ad.id || actionInProgress) return;
     setActionInProgress(true);
     try {
-      const updatedAdFromApi = await firebaseApi.createReservation(ad.id, currentUser.id);
-      if (updatedAdFromApi) {
-        showToast(`Richiesta di prenotazione per "${updatedAdFromApi.title}" inviata!`, 'success');
-        fetchAd();
-      }
+      await firebaseApi.createReservation(ad.id, currentUser.id);
+      showToast(`Richiesta di prenotazione per "${ad.title}" inviata!`, 'success');
+      fetchAd();
     } catch (e: any) {
       showToast(`Errore nella prenotazione: ${e.message || 'Errore sconosciuto'}`, 'error');
     } finally {
@@ -133,22 +131,6 @@ const AdDetailPage: React.FC = () => {
     if (!currentUser || !ad || !ad.user || !ad.reservedByUserId || actionInProgress) return;
 
     let participantIdsForChat: string[];
-    let reservationIdForChat: string | undefined;
-
-    if (ad.reservationStatus === ReservationStatus.ACCEPTED) {
-        const reservations = await db.collection('reservations')
-          .where('adId', '==', ad.id)
-          .where('status', '==', ReservationStatus.ACCEPTED)
-          .where('requesterId', '==', ad.reservedByUserId) 
-          .limit(1).get();
-
-        if (!reservations.empty) {
-            reservationIdForChat = reservations.docs[0].id;
-        } else {
-            console.warn("No matching ACCEPTED reservation found to link chat to for ad:", ad.id);
-        }
-    }
-
 
     if (currentUser.id === ad.userId) { // Current user is the ad owner
         participantIdsForChat = [currentUser.id, ad.reservedByUserId];
@@ -164,8 +146,7 @@ const AdDetailPage: React.FC = () => {
         const chatSession = await firebaseApi.createChatSession(
           participantIdsForChat, 
           ad.id, 
-          ad.title, 
-          reservationIdForChat, 
+          ad.title,
           true 
         ); 
         if (chatSession) {
@@ -202,7 +183,6 @@ const AdDetailPage: React.FC = () => {
   const postedDate = new Date(ad.postedAt).toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric' });
   const isMyAd = currentUser?.id === ad.userId;
   const amITheCurrentReserver = ad.isReserved && ad.reservedByUserId === currentUser?.id;
-  const amIOnWaitingList = currentUser && ad.waitingListUserIds?.includes(currentUser.id);
 
   let reservationInfoText = null;
   if (ad.isReserved) {
@@ -307,10 +287,6 @@ const AdDetailPage: React.FC = () => {
               </div>
             )}
             
-            {amIOnWaitingList && (
-                 <p className="text-sm text-center text-blue-700 font-medium bg-blue-100 p-3 rounded-md border border-blue-200">Sei in lista d'attesa per questo oggetto.</p>
-            )}
-
           {!isMyAd && currentUser && (
             <div className="mt-6 space-y-3">
               {ad.isStreetFind && (

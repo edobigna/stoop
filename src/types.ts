@@ -1,14 +1,5 @@
-import firebase from 'firebase/compat/app';
 
-export enum ReportReason {
-  SPAM = 'SPAM',
-  OFFENSIVE = 'OFFENSIVE',
-  NOT_FREE = 'NOT_FREE',
-  MISLEADING = 'MISLEADING',
-  SOLD_ELSEWHERE = 'SOLD_ELSEWHERE',
-  SAFETY_CONCERN = 'SAFETY_CONCERN',
-  OTHER = 'OTHER',
-}
+import firebase from 'firebase/compat/app';
 
 export interface User {
   id: string;
@@ -33,6 +24,16 @@ export enum ReservationStatus {
   COMPLETED = 'COMPLETED',
 }
 
+export enum ReportReason {
+  SPAM = 'SPAM',
+  OFFENSIVE = 'OFFENSIVE',
+  NOT_FREE = 'NOT_FREE',
+  MISLEADING = 'MISLEADING',
+  SOLD_ELSEWHERE = 'SOLD_ELSEWHERE',
+  SAFETY_CONCERN = 'SAFETY_CONCERN',
+  OTHER = 'OTHER',
+}
+
 // How Ad data is stored in Firestore
 export interface FirestoreAdData {
   userId: string;
@@ -46,7 +47,6 @@ export interface FirestoreAdData {
   isReserved?: boolean;
   reservedByUserId?: string;
   reservationStatus?: ReservationStatus;
-  waitingListUserIds?: string[];
   tags?: string[];
   isStreetFind?: boolean;
 }
@@ -68,6 +68,7 @@ export interface Reservation {
   adMainImage?: string;
   requesterId: string;
   requesterName: string;
+  requesterProfilePhotoUrl?: string;
   ownerId: string;
   status: ReservationStatus;
   requestedAt: string; // ISOString
@@ -105,7 +106,6 @@ export interface ChatSession {
   isClosed: boolean;
   closedByUserId?: string;
   reservationWasAccepted?: boolean;
-  reservationId?: string; // Link back to the reservation
 }
 
 export interface AppNotification {
@@ -117,17 +117,14 @@ export interface AppNotification {
     | 'RESERVATION_DECLINED'
     | 'RESERVATION_CANCELLED'
     | 'NEW_MESSAGE'
-    | 'WAITING_LIST_JOINED'
-    | 'PROMOTED_FROM_WAITING_LIST'
-    | 'OWNER_WAITING_LIST_UPDATE'
     | 'STREET_FIND_PICKED_UP'
+    | 'GENERAL_INFO'
     | 'EXCHANGE_COMPLETED'
     | 'AD_REPORTED_CONFIRMATION'
-    | 'OWNER_AD_REPORTED'
-    | 'GENERAL_INFO';
+    | 'OWNER_AD_REPORTED';
   title: string;
   message: string;
-  relatedItemId?: string; // Can be adId, chatId, reservationId etc.
+  relatedItemId?: string;
   isRead: boolean;
   createdAt: string; // ISOString
   reservationDetails?: {
@@ -170,7 +167,6 @@ export interface AdCardProps {
   showDeleteButton?: boolean;
   onDeleteAd?: (adId: string) => void;
   onEditAd?: (adId: string) => void;
-  onAdUpdated?: (updatedAd: Ad) => void;
 }
 
 
@@ -183,23 +179,23 @@ export interface FirebaseApiServiceType {
   updateUserProfile: (userId: string, updates: Partial<User>) => Promise<User | null>;
   uploadImage: (file: File, path: string) => Promise<string>;
   deleteImageByUrl: (imageUrl: string) => Promise<void>;
+  getCompletedReservationsCountForUser: (userId: string) => Promise<number>;
   
-  _mapAdDataToAd: (adDoc: firebase.firestore.QueryDocumentSnapshot | firebase.firestore.DocumentSnapshot) => Promise<Ad | null>;
+  _mapAdDataToAd: (adDoc: firebase.firestore.QueryDocumentSnapshot | firebase.firestore.DocumentSnapshot) => Promise<Ad>;
   getAds: () => Promise<Ad[]>;
   getAdById: (adId: string) => Promise<Ad | null>;
   getUserAds: (userId: string) => Promise<Ad[]>;
-  getCompletedReservationsCountForUser: (userId: string) => Promise<number>;
   createAd: (adData: AdCreationData) => Promise<Ad | null>;
   updateAd: (adId: string, updates: AdUpdateData, newImageFiles: File[], currentImageUrls: string[], originalImageUrls: string[]) => Promise<Ad | null>;
   deleteAd: (adId: string, userId: string) => Promise<void>;
   
-  createReservation: (adId: string, requesterId: string) => Promise<Ad | null>;
-  updateReservationStatus: (reservationId: string, newStatus: ReservationStatus, currentUserId: string, originalNotificationId?: string) => Promise<Reservation | null>;
-  joinWaitingList: (adId: string, userId: string) => Promise<Ad | null>;
+  createReservation: (adId: string, requesterId: string) => Promise<void>;
+  getReservationsForAd: (adId: string) => Promise<Reservation[]>;
+  updateReservationStatus: (reservationId: string, newStatus: ReservationStatus, currentUserId: string, originalNotificationId?: string) => Promise<void>;
   claimStreetFind: (adId: string, pickerUserId: string, adOwnerId: string, adTitle: string) => Promise<Ad | null>;
   
   _mapChatSessionData: (doc: firebase.firestore.DocumentSnapshot) => Promise<ChatSession>;
-  createChatSession: (participantIds: string[], adId: string, adTitle: string, reservationId?: string, reservationWasAccepted?: boolean) => Promise<ChatSession | null>;
+  createChatSession: (participantIds: string[], adId: string, adTitle: string, reservationWasAccepted?: boolean) => Promise<ChatSession | null>;
   getChatSessionsStreamed: (userId: string, callback: (sessions: ChatSession[]) => void, onError: (error: Error) => void) => () => void;
   getChatSessionStreamedById: (chatId: string, currentUserId:string, callback: (session: ChatSession | null) => void, onError: (error: Error) => void) => () => void;
   getChatMessagesStreamed: (chatId: string, currentUserId: string, callback: (messages: ChatMessage[]) => void, onError?: (error: Error) => void) => () => void;
@@ -211,7 +207,7 @@ export interface FirebaseApiServiceType {
   getNotificationsStreamed: (userId: string, callback: (notifications: AppNotification[]) => void, onError: (error: Error) => void) => () => void;
   getUnreadNotificationsCountStreamed: (userId: string, callback: (count: number) => void, onError?: (error: Error) => void) => () => void;
   markNotificationAsRead: (notificationId: string, userId: string) => Promise<void>;
-  
+
   createReport: (adId: string, reporterId: string, adOwnerId: string, adTitle: string, reason: ReportReason, details: string) => Promise<void>;
 
   getCurrentLocation: () => Promise<LocationCoords>;
